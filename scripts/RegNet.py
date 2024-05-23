@@ -33,8 +33,10 @@ BN - Batch Normalization
 import torch
 import numpy as np
 from torch import nn
-from typing import List
 from ConvLSTM import ConvLSTM
+from typing import List, Tuple
+from torch.functional import Tensor
+
 
 device = 'cuda' if torch.cuda.is_available else 'cpu'
 
@@ -42,44 +44,90 @@ class RegNetCell(nn.Module):
     """
     RegNet Class containing init and forward methods
     """
-    def __init__(self, input_channels, hidden_channels, bias):
-        super().__init__()
-        self.input_channels = input_channels
-        self.hidden_channels = hidden_channels
-        self.bias = bias
+    def __init__(self, input_channels, hidden_dim, channels, conv_lstm):
+        super(RegNetCell, self).__init__()
+        self.hidden_dim = hidden_dim
+        
+        # Block 1
         self.conv1 = self.conv = nn.Conv2d(in_channels=self.input_channels,
                               out_channels=self.hidden_channels,
-                              kernel_size=1,
-                              bias = self.bias)
+                              kernel_size=3,
+                              padding=1,
+                              stride=1,
+                              bias = False)
+        self.BatchNorm1 = nn.BatchNorm2d(channels)
+        self.ReLU1 = nn.Relu()
+        
+        # Block 2
+        self.conv_lstm = conv_lstm
+        self.BatchNorm_lstm  = nn.BatchNorm2d(channels)
+        self.ReLU_lstm  = nn.Relu()
+        
+        # Block 3
         self.conv3 = self.conv = nn.Conv2d(in_channels=self.input_channels,
+                              out_channels=self.hidden_dim,
+                              kernel_size=1,
+                              stride=1,
+                              bias = False)
+        self.BatchNorm3 = nn.BatchNorm2d(channels)
+        self.ReLU3 = nn.Relu()
+        
+        # Block 4
+        self.conv4 = self.conv = nn.Conv2d(in_channels=self.input_channels,
                               out_channels=self.hidden_channels,
                               kernel_size=3,
-                              bias = self.bias)
-        self.ConvLSTM = ConvLSTM(kernel_size=3)
-        self.ReLU = nn.ReLU()
-        self.BN = nn.BatchNorm2d
+                              padding=1,
+                              stride=1,
+                              bias = False)
+        self.BatchNorm4 = nn.BatchNorm2d(channels)
+        self.ReLU4 = nn.Relu()
+        
+        # Block 5
+        self.Relu5 = nn.ReLU()
     
     def init_hidden_weights(self, batch_size, img_size):
         height, width = img_size.shape
         return (Variable(torch.zeros(batch_size, self.hidden_dim, height, width, device=device)),
                 Variable(torch.zeros(batch_size, self.hidden_dim, height, width, device=device)))
         
-    def forward(self, x, H, C):
+    def forward(self, x: Tensor, state:Tuple[Tensor, Tensor]) -> Tuple[Tensor, Tensor]:
+        """
         H, C = hidden_state[-1]
         
         Xt_2 = self.ReLU(self.BN(self.conv(x)))
         
         H, C = self.ReLU(self.BN(self.ConvLSTM(Xt_2, [H, C]))) 
         
-        X_H = np.cat(Xt_2, H)
+        X_H = np.cat([Xt_2, H], dim = 1)
         Xt_3 = self.ReLU(self.BN(self.conv1(X_H)))
         Xt_4 = self.BN(self.conv3(Xt_3))
         X_out = self.ReLU(x + Xt_4)
+        """
+        H, C = state
+        x2 = self.conv1(x)
+        x2 = self.BatchNorm1(x2)
+        x2 = self.ReLU1(x2)
+        
+        x_convLSTM = self.conv_lstm(x2, state)
+        x_convLSTM = self.BatchNorm_lstm(x_convLSTM)
+        H_new, C_new = self.ReLU_lstm(x_convLSTM)
+        
+        x3 = torch.cat([x2, H_new], dim=1)
+        x3 = self.conv3(x3)
+        x3 = self.BatchNorm3(x3)
+        x3 = self.ReLU3(x3)
+        
+        x4 = self.conv4(x3)
+        x4 = self.BatchNorm4(x4)
+        
+        x_out = self.Relu5(x + x4)
+        
         return X_out, H, C
     
-class RegNet(nn.Module):
+class RegNetBlock(nn.Module):
     
     def __init__(self, input_channels, hidden_channels, kernel_size, num_layers):
+        super(RegNetBlock, self).__init__()
         self.input_channels = input_channels
         self.hidden_channels = hidden_channels
         self.kernel_size = kernel_size

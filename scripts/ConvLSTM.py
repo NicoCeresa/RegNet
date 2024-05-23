@@ -6,7 +6,8 @@ by Nico Ceresa
 import torch
 import numpy as np
 from torch import nn
-from typing import List
+from typing import List, Tuple
+from torch.functional import Tensor
 from torch.auto_grad import Variable
 
 device = 'cuda' if torch.cuda.is_available else 'cpu'
@@ -22,21 +23,15 @@ class ConvLSTMCell(nn.Module):
        padding: int
        bias: int
     """
-    def __init__(self, in_dim, hidden_dim, kernel_size, padding, bias):
+    def __init__(self, in_dim: int, channels: int, kernel_size=3):
         super().__init__()
         self.in_dim = in_dim
-        self.hidden_dim = hidden_dim
-        self.padding = padding
-        self.bias = bias
-        self.conv = nn.Conv2d(in_channels=self.in_dim,
-                              out_channels=self.hidden_dim,
+        self.channels = channels
+        self.conv = nn.Conv2d(in_channels=in_dim + channels,
+                              out_channels=channels * 4,
                               kernel_size=self.kernel_size,
-                              padding=self.padding,
-                              bias = self.bias)
-
-        self.W_c = None
-        self.W_f = None
-        self.W_o = None
+                              padding=kernel_size // 2,
+                              bias = True)
         
     def sigmoid(self, x):
         return 1/(1 + np.exp(-x))
@@ -46,22 +41,28 @@ class ConvLSTMCell(nn.Module):
         denom = np.exp(x) + np.exp(-x)
         return num/denom
     
-    def init_hidden(self, batch_size, img_size):
-        height, width = img_size.shape
-        return (Variable(torch.zeros(batch_size, self.hidden_dim, height, width, device=device)),
-                Variable(torch.zeros(batch_size, self.hidden_dim, height, width, device=device)))
+    def init_hidden(self, batch_size, channels, image):
+        height, width = image.shape
+        return (Variable(torch.zeros(batch_size, channels, height, width, device=device)),
+                Variable(torch.zeros(batch_size, channels, height, width, device=device)))
     
-    def forward(self, x, h, c):
+    def forward(self, x: Tensor, h: Tensor, c: Tensor) -> Tuple[Tensor, Tensor]:
+        h, c = c.to(device), h.to(device)
         
-        it = self.sigmoid(self.conv(x) + self.conv(h) + c * self.W_c)
-        ft = self.sigmoid(self.conv(x) + self.conv(h) + c * self.W_f)
+        x = np.cat([x, h], dim=1)
+        conv_x = self.conv(x)
         
-        Ct = np.multiply(ft, c) + np.multiply(it, self.conv(x) + self.conv(h))
-        ot = self.sigmoid(self.conv(x) + self.conv(h) + Ct * self.W_o)
+        it, ft, ot, gt = torch.split(conv_x, self.hidden_dim, dim=1)
         
-        Ht = np.multiply(ot, self.tanh(Ct))
+        it = self.sigmoid(it)
+        ft = self.sigmoid(ft)
+        ot = self.sigmoid(ot)
+        gt = self.tanh(dt)
         
-        return Ht, Ct
+        C_next = it * Ct + ot * dt
+        H_next = ot * self.tanh(Ct)
+        
+        return H_next, C_next
     
         
 class ConvLSTM(nn.Module):
@@ -74,14 +75,14 @@ class ConvLSTM(nn.Module):
         kernel_size: List
         steps=2: int
     """
-    def __init__(self, input_channels, hidden_channels, kernel_size):
+    def __init__(self, input_channels, hidden_dim, channels, kernel_size=3):
         self.input_channels = input_channels
-        self.hidden_channels = hidden_channels
+        self.hidden_dim = hidden_dim
         self.kernel_size = kernel_size
-        self.num_layers = len(hidden_channels)
+        self.num_layers = len(hidden_dim)
         self.cell_layers = []
         for i in range(self.num_layers):
-            cell = ConvLSTMCell(self.input_channels[i], self.hidden_channels[i], self.kernel_size[i])
+            cell = ConvLSTMCell(self.input_channels[i], self.hidden_dim[i], self.kernel_size[i])
             self.cell_layers.append(cell)
 
             
@@ -103,7 +104,7 @@ class ConvLSTM(nn.Module):
                                              img_size=(height, width))
         
         for layer in range(self.num_layers):
-            h, c = hidden_state[layer]
+            h_c = hidden_state[layer]
             output_inner = []
             for i in range(sequences):
                 h_c = self.cell_layers[layer]
